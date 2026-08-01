@@ -1,0 +1,78 @@
+include "test"
+| include "codeowners"
+
+# -- Fixtures --
+
+| let codeowners_input = "# global fallback\n*       @global-owner\n*.js    @js-owner @org/js-team\n\n# docs directory (trailing slash, dir only)\n/docs/  docs@example.com\n\n# anchored nested pattern\n/apps/web/*.tsx @frontend-team\n\n# negated-looking but codeowners has no negation; later pattern still wins\napps/**/*.test.js @qa-team" |
+
+# -- Parsing --
+
+def test_codeowners_parse_skips_comments_and_blank_lines():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_eq(len(entries), 5)
+end
+
+def test_codeowners_parse_pattern_and_owners():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_eq(entries[0]["pattern"], "*")
+  | assert_eq(entries[0]["owners"], ["@global-owner"])
+end
+
+def test_codeowners_parse_multiple_owners():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_eq(entries[1]["owners"], ["@js-owner", "@org/js-team"])
+end
+
+# -- Matching --
+
+def test_codeowners_owners_global_fallback():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_eq(codeowners_owners(entries, "README.md"), ["@global-owner"])
+end
+
+def test_codeowners_owners_extension_pattern_overrides_global():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_eq(codeowners_owners(entries, "src/index.js"), ["@js-owner", "@org/js-team"])
+end
+
+def test_codeowners_owners_directory_pattern():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_eq(codeowners_owners(entries, "docs/guide/readme.md"), ["docs@example.com"])
+end
+
+def test_codeowners_owners_anchored_nested_pattern():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_eq(codeowners_owners(entries, "apps/web/App.tsx"), ["@frontend-team"])
+end
+
+def test_codeowners_owners_anchored_pattern_does_not_match_elsewhere():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_eq(codeowners_owners(entries, "other/App.tsx"), ["@global-owner"])
+end
+
+def test_codeowners_owners_last_match_wins():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_eq(codeowners_owners(entries, "apps/web/foo.test.js"), ["@qa-team"])
+end
+
+def test_codeowners_for_one_call():
+  assert_eq(codeowners_for(codeowners_input, "src/index.js"), ["@js-owner", "@org/js-team"])
+end
+
+def test_codeowners_is_unowned_false_due_to_global_fallback():
+  let entries = codeowners_parse(codeowners_input)
+  | assert_false(codeowners_is_unowned(entries, "anything.txt"))
+end
+
+def test_codeowners_is_unowned_true_without_global_fallback():
+  let entries = codeowners_parse("*.rb @ruby-team")
+  | assert(codeowners_is_unowned(entries, "app.py"))
+end
+
+# -- Markdown table --
+
+def test_codeowners_to_markdown_table():
+  let table = codeowners_to_markdown_table(codeowners_parse(codeowners_input))
+  | assert(contains(table, "| Pattern | Owners |"))
+  | assert(contains(table, "| *.js | @js-owner, @org/js-team |"))
+end

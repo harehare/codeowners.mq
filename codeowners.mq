@@ -1,0 +1,124 @@
+# GitHub CODEOWNERS parser and matcher implemented in mq
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Path patterns follow the same conventions as .gitignore (this module's glob
+# translation is intentionally the same as gitignore.mq's, kept as a local,
+# self-contained copy rather than a cross-module dependency).
+
+def _co_regex_escape_char(c):
+  if (contains(".^$+(){}|]\\", c)): "\\" + c
+  else: c
+end
+
+# Parses a `[...]` character class starting at `pattern[start]` (the `[`).
+# Returns `[next_pos, regex_fragment]`; falls back to a literal `\[` if
+# the class is unterminated.
+def _co_char_class(pattern, start):
+  var j = start + 1
+  | let n = len(pattern)
+  | var neg = false
+  | let _ = if (j < n && (pattern[j] == "!" || pattern[j] == "^")):
+      do neg = true | j += 1 | true end
+    else:
+      true
+  | var body = ""
+  | let _ = if (j < n && pattern[j] == "]"):
+      do body = body + "\\]" | j += 1 | body end
+    else:
+      body
+  | var done = false
+  | let _ = while (j < n && !done):
+      if (pattern[j] == "]"):
+        do done = true | body end
+      else:
+        do body = body + pattern[j] | j += 1 | body end
+    end
+  | if (!done):
+      [start + 1, "\\["]
+    else:
+      [j + 1, "[" + (if (neg): "^" else: "") + body + "]"]
+end
+
+# Translates a single gitignore-style glob (no leading `/` or trailing `/` —
+# those are handled by `_co_pattern_regex`) into a regex body.
+def _co_glob_to_regex_body(pattern):
+  var i = 0
+  | let n = len(pattern)
+  | var out = ""
+  | let _ = while (i < n):
+      let c = pattern[i]
+      | if (c == "\\" && i + 1 < n):
+          do out = out + _co_regex_escape_char(pattern[i + 1]) | i += 2 | out end
+        elif (c == "*" && i + 1 < n && pattern[i + 1] == "*" && i + 2 < n && pattern[i + 2] == "/"):
+          do out = out + "(?:.*/)?" | i += 3 | out end
+        elif (c == "*" && i + 1 < n && pattern[i + 1] == "*"):
+          do out = out + ".*" | i += 2 | out end
+        elif (c == "*"):
+          do out = out + "[^/]*" | i += 1 | out end
+        elif (c == "?"):
+          do out = out + "[^/]" | i += 1 | out end
+        elif (c == "["):
+          do
+            let r = _co_char_class(pattern, i)
+            | out = out + r[1]
+            | i = r[0]
+            | out
+          end
+        else:
+          do out = out + _co_regex_escape_char(c) | i += 1 | out end
+    end
+  | out
+end
+
+# Compiles a CODEOWNERS path pattern into an anchored regex string.
+def _co_pattern_regex(pattern):
+  let dir_only = ends_with(pattern, "/") && len(pattern) > 1
+  | let p1 = if (dir_only): slice(pattern, 0, len(pattern) - 1) else: pattern
+  | let leading_slash = starts_with(p1, "/")
+  | let p2 = if (leading_slash): slice(p1, 1, len(p1)) else: p1
+  | let anchored = leading_slash || contains(p2, "/")
+  | let body = _co_glob_to_regex_body(p2)
+  | let prefix = if (anchored): "^" else: "^(?:.*/)?"
+  | let suffix = if (dir_only): "(?:/.*)?$" else: "$"
+  | prefix + body + suffix
+end
+
+def _co_parse_line(raw_line):
+  let line = trim(raw_line)
+  | if (line == "" || starts_with(line, "#")):
+      None
+    else:
+      do
+        let tokens = scan(line, "\\S+")
+        | let pattern = first(tokens)
+        | {"pattern": pattern, "regex": _co_pattern_regex(pattern), "owners": skip(tokens, 1)}
+      end
+end
+
+# Parses CODEOWNERS file contents into an array of pattern entries:
+# {"pattern": <original glob>, "regex": <compiled regex>, "owners": [<string>, ...]}.
+# Blank lines and `#` comments are skipped.
+def codeowners_parse(input):
+  compact(map(lines(replace(to_string(input), "\r\n", "\n")), fn(l): _co_parse_line(l);))
+end
+
+# Returns the owners for `path` given parsed CODEOWNERS entries (as returned
+# by `codeowners_parse`). The LAST matching entry wins, per GitHub's rules.
+# Returns an empty array if no pattern matches (unowned).
+def codeowners_owners(entries, path):
+  let p = ltrimstr(path, "/")
+  | fold(entries, [], fn(acc, e): if (is_regex_match(p, e["regex"])): e["owners"] else: acc;)
+end
+
+# Parses `text` as CODEOWNERS contents and looks up owners for `path` in one call.
+def codeowners_for(text, path): codeowners_owners(codeowners_parse(text), path);
+
+# Returns true if `path` has no matching CODEOWNERS entry.
+def codeowners_is_unowned(entries, path): is_empty(codeowners_owners(entries, path));
+
+# Returns a Markdown table summarizing all patterns and their owners, in file order.
+def codeowners_to_markdown_table(entries):
+  let header = "| Pattern | Owners |\n| --- | --- |"
+  | let rows = map(entries, fn(e): "| " + e["pattern"] + " | " + join(e["owners"], ", ") + " |";)
+  | join([header] + rows, "\n")
+end
